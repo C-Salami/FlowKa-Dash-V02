@@ -1,66 +1,74 @@
 import streamlit as st
-import pandas as pd
 import plotly.express as px
 from spa_data import WORKERS, SERVICES, DAY_START
 from utils import build_schedule_df
 
-st.set_page_config(page_title="Spa Scheduler (Streamlit test)", layout="wide")
+st.set_page_config(page_title="Spa Scheduler — Streamlit (Form + Gantt)", layout="wide")
 
+# indexes
 services_idx = {s["id"]: s for s in SERVICES}
 workers_idx  = {w["id"]: w for w in WORKERS}
 
-st.title("Spa Scheduler — Streamlit (Test Viewer)")
+# ---- app state (no backlog, no worker columns UI)
+if "seq" not in st.session_state:
+    st.session_state.seq = 0
+if "workers" not in st.session_state:
+    st.session_state.workers = [{"worker_id": w["id"], "tasks": []} for w in WORKERS]
 
-backlog = st.session_state.setdefault("backlog", [
-    {"id":"t1","customer":"Lina","service_id":"svc_thai"},
-    {"id":"t2","customer":"Rafi","service_id":"svc_deep"},
-    {"id":"t3","customer":"Maya","service_id":"svc_facial"},
-])
-workers = st.session_state.setdefault("workers", [{"worker_id": w["id"], "tasks": []} for w in WORKERS])
-seq = st.session_state.setdefault("seq", 3)
+def push_to_plan(customer: str, service_id: str, worker_id: str):
+    st.session_state.seq += 1
+    st.session_state.workers = list(st.session_state.workers)  # shallow copy
+    for col in st.session_state.workers:
+        if col["worker_id"] == worker_id:
+            col["tasks"].append({"id": f"t{st.session_state.seq}", "customer": customer, "service_id": service_id})
+            break
 
-with st.sidebar:
-    st.header("Add booking")
-    cust = st.text_input("Customer")
-    svc  = st.selectbox("Service", options=[s["id"] for s in SERVICES], format_func=lambda i: f"{services_idx[i]['name']} ({services_idx[i]['duration_min']}m)")
-    if st.button("Add to backlog") and cust and svc:
-        st.session_state["seq"] += 1
-        backlog.append({"id": f"t{st.session_state['seq']}", "customer": cust, "service_id": svc})
+# ---- layout: 20% form | 80% gantt
+left, right = st.columns([1,4], gap="large")
 
-st.subheader("Backlog")
-for t in list(backlog):
-    c1,c2 = st.columns([2,1])
+with left:
+    st.title("Spa Scheduler")
+    st.subheader("Add booking")
+    customer = st.text_input("Customer")
+    service_id = st.selectbox(
+        "Service",
+        options=[s["id"] for s in SERVICES],
+        format_func=lambda sid: f"{services_idx[sid]['name']} ({services_idx[sid]['duration_min']}m)",
+        index=0 if SERVICES else None,
+    )
+    worker_id = st.selectbox(
+        "Worker",
+        options=[w["id"] for w in WORKERS],
+        format_func=lambda wid: workers_idx[wid]["name"],
+        index=0 if WORKERS else None,
+    )
+
+    c1, c2 = st.columns([2,1])
     with c1:
-        st.write(f"**{t['customer']}** — {services_idx[t['service_id']]['name']}")
+        if st.button("Push to plan", use_container_width=True, type="primary") and customer and service_id and worker_id:
+            push_to_plan(customer, service_id, worker_id)
     with c2:
-        dest = st.selectbox("Assign to", options=["-"] + [w["id"] for w in WORKERS],
-                            key=f"assign_{t['id']}", label_visibility="collapsed",
-                            format_func=lambda i: "-" if i=="-" else workers_idx[i]["name"])
-        if dest != "-":
-            backlog.remove(t)
-            [col for col in workers if col["worker_id"]==dest][0]["tasks"].append(t)
+        if st.button("Reset day", help="Clear all bookings"):
+            st.session_state.seq = 0
+            st.session_state.workers = [{"worker_id": w["id"], "tasks": []} for w in WORKERS]
 
-st.subheader("Workers")
-for col in workers:
-    wname = workers_idx[col["worker_id"]]["name"]
-    with st.expander(wname, expanded=True):
-        for i,t in enumerate(list(col["tasks"])):
-            c1,c2,c3,c4 = st.columns([3,1,1,1])
-            c1.write(f"**{t['customer']}** — {services_idx[t['service_id']]['name']}")
-            if c2.button("↑", key=f"up_{col['worker_id']}_{i}") and i>0:
-                col["tasks"][i-1], col["tasks"][i] = col["tasks"][i], col["tasks"][i-1]
-            if c3.button("↓", key=f"down_{col['worker_id']}_{i}") and i<len(col["tasks"])-1:
-                col["tasks"][i+1], col["tasks"][i] = col["tasks"][i], col["tasks"][i+1]
-            if c4.button("Remove", key=f"rm_{col['worker_id']}_{i}"):
-                col["tasks"].pop(i)
+    st.caption("This Streamlit view matches your UI rules: only the form and the Gantt. "
+               "Drag & drop on the chart is available in the Dash app.")
 
-df = build_schedule_df({"workers": workers}, services_idx, workers_idx, DAY_START)
-st.subheader("Schedule")
-if df.empty:
-    st.info("No tasks scheduled yet.")
-else:
-    fig = px.timeline(df, x_start="Start", x_end="Finish", y="Worker", color="Service", text="Customer", hover_data=["Duration(min)"])
-    fig.update_yaxes(autorange="reversed")
-    st.plotly_chart(fig, use_container_width=True)
-
-st.caption("This Streamlit app validates schedule logic; the Dash app provides drag & drop.")
+with right:
+    st.subheader("Schedule")
+    df = build_schedule_df(
+        {"workers": st.session_state.workers},
+        services_idx, workers_idx, DAY_START
+    )
+    if df.empty:
+        st.info("No bookings yet. Add one on the left.")
+    else:
+        fig = px.timeline(
+            df, x_start="Start", x_end="Finish",
+            y="Worker", color="Service", text="Customer", hover_data=["Duration(min)"]
+        )
+        fig.update_yaxes(autorange="reversed")
+        fig.update_traces(textposition="inside", insidetextanchor="start", textfont_size=12, cliponaxis=False)
+        fig.update_layout(margin=dict(l=20, r=20, t=40, b=20), height=760)
+        st.plotly_chart(fig, use_container_width=True)
