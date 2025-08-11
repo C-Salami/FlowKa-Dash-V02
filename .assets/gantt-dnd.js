@@ -1,20 +1,22 @@
-// Drag & drop directly on the Plotly Gantt bars.
-// We detect dragging on <rect> nodes, find their curve/point indices,
-// resolve TaskId via customdata, compute the drop X (as ISO time) and drop Y (worker name),
-// then dispatch a CustomEvent("gantt-dnd-drop", { detail: { taskId, dropWorkerName, dropXISO } }).
+// Drag & drop directly on Plotly Gantt bars.
+// Fixes:
+//  - dispatch the event on the EventListener host (NOT document)
+//  - use xaxis.p2l(px) -> xaxis.l2d(lin) for pixel->date conversion
 
 (function() {
   function findGraphDiv() {
     return document.querySelector('div.js-plotly-plot');
   }
+  function findEventHost() {
+    return document.getElementById('gantt_dnd_listener');
+  }
 
   function pxToXISO(gd, px) {
-    // convert pixel (relative to plot area) to x (date) then to ISO
     try {
       const xa = gd._fullLayout.xaxis;
-      const xVal = xa.p2l ? xa.p2l(px) : xa.p2d(px); // p2l for pixel->linear
-      // plotly stores ms since epoch for dates; normalize to Date
-      const dt = new Date(xVal);
+      const lin = xa.p2l(px);        // pixel -> linear
+      const dat = xa.l2d(lin);       // linear -> data (ms since epoch for date axis)
+      const dt  = new Date(dat);
       return dt.toISOString();
     } catch (e) {
       return null;
@@ -26,7 +28,6 @@
       const ya = gd._fullLayout.yaxis;
       const cats = (ya && ya.categoryarray) || [];
       if (!ya || !ya.l2p) return null;
-      // choose the category whose pixel position is closest to py
       let best = null, bestDist = Infinity;
       for (const name of cats) {
         const p = ya.l2p(name); // data value -> pixel
@@ -40,7 +41,6 @@
   }
 
   function resolveTaskIdFromNode(gd, rectNode) {
-    // Plotly attaches data-curvenumber and data-pointnumber to bar nodes.
     const curve = rectNode.getAttribute('data-curvenumber');
     const point = rectNode.getAttribute('data-pointnumber');
     if (curve == null || point == null) return null;
@@ -52,7 +52,8 @@
 
   function install() {
     const gd = findGraphDiv();
-    if (!gd || gd._ganttDndInstalled) return;
+    const host = findEventHost();
+    if (!gd || !host || gd._ganttDndInstalled) return;
     gd._ganttDndInstalled = true;
 
     let dragging = null;
@@ -67,38 +68,28 @@
       const plotArea = gd.querySelector('.cartesianlayer .plot');
       if (!plotArea) return;
 
-      // get plot area bounding box to compute local px/py
       const plotBox = plotArea.getBoundingClientRect();
-
-      dragging = { taskId, startX: e.clientX, startY: e.clientY, plotBox };
+      dragging = { taskId, plotBox };
       e.preventDefault();
     }, true);
 
-    window.addEventListener('mousemove', function(e) {
-      if (!dragging) return;
-      // could draw a ghost; keeping it simple
-    });
-
     window.addEventListener('mouseup', function(e) {
       if (!dragging) return;
-      const gd = findGraphDiv();
-      const plotArea = gd && gd.querySelector('.cartesianlayer .plot');
-      if (!gd || !plotArea) { dragging = null; return; }
+      const plotArea = gd.querySelector('.cartesianlayer .plot');
+      if (!plotArea) { dragging = null; return; }
 
       const { plotBox, taskId } = dragging;
       const px = e.clientX - plotBox.left; // x inside plot
       const py = e.clientY - plotBox.top;  // y inside plot
 
-      // convert to axis values
       const xISO = pxToXISO(gd, px);
       const worker = pyToWorker(gd, py);
 
       if (xISO && worker) {
-        const ev = new CustomEvent('gantt-dnd-drop', {
-          detail: { taskId: taskId, dropWorkerName: worker, dropXISO: xISO },
+        host.dispatchEvent(new CustomEvent('gantt-dnd-drop', {
+          detail: { taskId, dropWorkerName: worker, dropXISO: xISO },
           bubbles: true
-        });
-        document.dispatchEvent(ev);
+        }));
       }
       dragging = null;
     });
