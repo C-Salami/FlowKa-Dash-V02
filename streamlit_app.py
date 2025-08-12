@@ -1,74 +1,100 @@
+import io, os, requests, re
 import streamlit as st
-import plotly.express as px
-from spa_data import WORKERS, SERVICES, DAY_START
-from utils import build_schedule_df
 
-st.set_page_config(page_title="Spa Scheduler — Streamlit (Form + Gantt)", layout="wide")
+# --- simple aliases to recognize spa phrases in voice ---
+SERVICE_ALIASES = {
+    "swedish massage": "Swedish Massage", "swedish": "Swedish Massage",
+    "thai massage": "Thai Massage", "thai": "Thai Massage",
+    "deep tissue": "Deep Tissue", "hot stone": "Hot Stone",
+    "facial": "Facial Treatment", "reflexology": "Reflexology",
+}
 
-# indexes
-services_idx = {s["id"]: s for s in SERVICES}
-workers_idx  = {w["id"]: w for w in WORKERS}
+def parse_voice_command(cmd: str, service_names, worker_names):
+    t = cmd.strip()
 
-# ---- app state (no backlog, no worker columns UI)
-if "seq" not in st.session_state:
-    st.session_state.seq = 0
-if "workers" not in st.session_state:
-    st.session_state.workers = [{"worker_id": w["id"], "tasks": []} for w in WORKERS]
+    # service
+    svc = None
+    low = t.lower()
+    for k, proper in SERVICE_ALIASES.items():
+        if re.search(rf"\b{k}\b", low):
+            svc = service_names.get(proper.lower()); break
+    if not svc:
+        for proper in service_names:
+            if re.search(rf"\b{re.escape(proper)}\b", low):
+                svc = service_names[proper]; break
 
-def push_to_plan(customer: str, service_id: str, worker_id: str):
-    st.session_state.seq += 1
-    st.session_state.workers = list(st.session_state.workers)  # shallow copy
-    for col in st.session_state.workers:
-        if col["worker_id"] == worker_id:
-            col["tasks"].append({"id": f"t{st.session_state.seq}", "customer": customer, "service_id": service_id})
-            break
+    # worker (match by name token)
+    wrk = None
+    for wname in worker_names:
+        if re.search(rf"\b{re.escape(wname)}\b", low):
+            wrk = worker_names[wname]; break
 
-# ---- layout: 20% form | 80% gantt
-left, right = st.columns([1,4], gap="large")
+    # customer: prefer quoted, else after "customer "
+    cust = None
+    m = re.search(r'customer\s+"([^"]+)"', t, flags=re.IGNORECASE) \
+        or re.search(r"customer\s+'([^']+)'", t, flags=re.IGNORECASE) \
+        or re.search(r'customer\s+([A-Za-z][A-Za-z\-]+(?:\s+[A-Za-z][A-Za-z\-]+)?)', t, flags=re.IGNORECASE)
+    if m: cust = m.group(1).strip()
 
-with left:
-    st.title("Spa Scheduler")
-    st.subheader("Add booking")
-    customer = st.text_input("Customer")
-    service_id = st.selectbox(
-        "Service",
-        options=[s["id"] for s in SERVICES],
-        format_func=lambda sid: f"{services_idx[sid]['name']} ({services_idx[sid]['duration_min']}m)",
-        index=0 if SERVICES else None,
-    )
-    worker_id = st.selectbox(
-        "Worker",
-        options=[w["id"] for w in WORKERS],
-        format_func=lambda wid: workers_idx[wid]["name"],
-        index=0 if WORKERS else None,
-    )
+    if not all([svc, wrk, cust]): return None
+    return {"service_id": svc["id"], "worker_id": wrk["id"], "customer": cust}
 
-    c1, c2 = st.columns([2,1])
-    with c1:
-        if st.button("Push to plan", use_container_width=True, type="primary") and customer and service_id and worker_id:
-            push_to_plan(customer, service_id, worker_id)
-    with c2:
-        if st.button("Reset day", help="Clear all bookings"):
-            st.session_state.seq = 0
-            st.session_state.workers = [{"worker_id": w["id"], "tasks": []} for w in WORKERS]
+def transcribe_via_api(audio_bytes: bytes, mime_type: str) -> str:
+    provider = st.secrets.get("STT_PROVIDER", "groq").lower()
 
-    st.caption("This Streamlit view matches your UI rules: only the form and the Gantt. "
-               "Drag & drop on the chart is available in the Dash app.")
+    if provider == "groq":
+        # OpenAI-compatible: /v1/audio/transcriptions
+        url = "https://api.groq.com/openai/v1/audio/transcriptions"
+        headers = {"Authorization": f"Bearer {st.secrets['GROQ_API_KEY']}"}
+        files = {
+            "file": ("speech.webm", audio_bytes, mime_type),
+            "model": (None, st.secrets.get("STT_MODEL", "whisper-large-v3-turbo")),
+        }
+        r = requests.post(url, headers=headers, files=files, timeout=60)
+        r.raise_for_status()
+        data = r.json()
+        # Groq returns .text for plain text responses
+        return data.get("text") or data
 
-with right:
-    st.subheader("Schedule")
-    df = build_schedule_df(
-        {"workers": st.session_state.workers},
-        services_idx, workers_idx, DAY_START
-    )
-    if df.empty:
-        st.info("No bookings yet. Add one on the left.")
+    elif provider == "deepgram":
+        # Pre-recorded transcription endpoint ("listen")
+        url = "https://api.deepgram.com/v1/listen"
+        params = {"model": st.secrets.get("STT_MODEL", "nova-2-general"), "smart_format": "true"}
+        headers = {"Authorization": f"Token {st.secrets['DEEPGRAM_API_KEY']}"}
+        r = requests.post(url, params=params, headers=headers, data=audio_bytes)
+        r.raise_for_status()
+        data = r.json()
+        # typical path: results.channels[0].alternatives[0].transcript
+        return (data.get("results", {})
+                    .get("channels", [{}])[0]
+                    .get("alternatives", [{}])[0]
+                    .get("transcript", ""))
+
     else:
-        fig = px.timeline(
-            df, x_start="Start", x_end="Finish",
-            y="Worker", color="Service", text="Customer", hover_data=["Duration(min)"]
-        )
-        fig.update_yaxes(autorange="reversed")
-        fig.update_traces(textposition="inside", insidetextanchor="start", textfont_size=12, cliponaxis=False)
-        fig.update_layout(margin=dict(l=20, r=20, t=40, b=20), height=760)
-        st.plotly_chart(fig, use_container_width=True)
+        raise RuntimeError("Unsupported STT_PROVIDER")
+
+# --- UI: mic capture (Streamlit built-in) ---
+st.markdown("### Voice booking (mic)")
+audio = st.audio_input("Press to record, then stop", key="voice_mic")
+if audio is not None:
+    try:
+        # audio is an UploadedFile with .getvalue() and .type (MIME), usually audio/webm
+        transcript = transcribe_via_api(audio.getvalue(), audio.type or "audio/webm")
+        if not transcript:
+            st.warning("No speech detected")
+        else:
+            st.write(f"**Heard:** {transcript}")
+            parsed = parse_voice_command(
+                transcript,
+                {s["name"].lower(): s for s in SERVICES},
+                {w["name"].lower(): w for w in WORKERS},
+            )
+            if parsed:
+                push_to_plan(parsed["customer"], parsed["service_id"], parsed["worker_id"])
+                st.success(f"Added {services_idx[parsed['service_id']]['name']} for {parsed['customer']} → {workers_idx[parsed['worker_id']]['name']}")
+            else:
+                st.info('Try a phrasing like: `add a swedish massage to Budi for customer "Ali"`')
+    except requests.HTTPError as e:
+        st.error(f"STT API error: {e.response.text[:200]}")
+    except Exception as e:
+        st.error(f"Error: {e}")
