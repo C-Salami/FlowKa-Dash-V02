@@ -73,31 +73,40 @@ def transcribe_via_api(audio_bytes: bytes, mime_type: str) -> str:
     else:
         raise RuntimeError("Unsupported STT_PROVIDER")
 
-# --- UI: mic capture (Streamlit built-in) ---
 st.markdown("### Voice booking (mic)")
-audio = st.audio_input("Press to record, then stop", key="voice_mic")
-if audio is not None:
-    try:
-        # audio is an UploadedFile with .getvalue() and .type (MIME), usually audio/webm
+AUDIO_INPUT_AVAILABLE = hasattr(st, "audio_input")
+
+if AUDIO_INPUT_AVAILABLE:
+    audio = st.audio_input("Press to record, then stop", key="voice_mic")
+    if audio is not None:
         transcript = transcribe_via_api(audio.getvalue(), audio.type or "audio/webm")
-        if not transcript:
-            st.warning("No speech detected")
+        st.write(f"**Heard:** {transcript}")
+        parsed = parse_voice_command(
+            transcript,
+            {s["name"].lower(): s for s in SERVICES},
+            {w["name"].lower(): w for w in WORKERS},
+        )
+        if parsed:
+            push_to_plan(parsed["customer"], parsed["service_id"], parsed["worker_id"])
+            st.success(f"Added {services_idx[parsed['service_id']]['name']} for {parsed['customer']} → {workers_idx[parsed['worker_id']]['name']}")
         else:
-            st.write(f"**Heard:** {transcript}")
-            parsed = parse_voice_command(
-                transcript,
-                {s["name"].lower(): s for s in SERVICES},
-                {w["name"].lower(): w for w in WORKERS},
-            )
-            if parsed:
-                push_to_plan(parsed["customer"], parsed["service_id"], parsed["worker_id"])
-                st.success(f"Added {services_idx[parsed['service_id']]['name']} for {parsed['customer']} → {workers_idx[parsed['worker_id']]['name']}")
-            else:
-                st.info('Try a phrasing like: `add a swedish massage to Budi for customer "Ali"`')
-    except requests.HTTPError as e:
-        st.error(f"STT API error: {e.response.text[:200]}")
-    except Exception as e:
-        st.error(f"Error: {e}")
+            st.info('Try: `add a swedish massage to Budi for customer "Ali"`')
+else:
+    st.warning("Mic capture requires Streamlit ≥ 1.40. Using upload fallback for now.")
+    uploaded = st.file_uploader("Upload a short voice note", type=["webm","wav","m4a","mp3"])
+    if uploaded is not None:
+        transcript = transcribe_via_api(uploaded.getvalue(), uploaded.type or "audio/webm")
+        st.write(f"**Heard:** {transcript}")
+        parsed = parse_voice_command(
+            transcript,
+            {s["name"].lower(): s for s in SERVICES},
+            {w["name"].lower(): w for w in WORKERS},
+        )
+        if parsed:
+            push_to_plan(parsed["customer"], parsed["service_id"], parsed["worker_id"])
+            st.success(f"Added {services_idx[parsed['service_id']]['name']} for {parsed['customer']} → {workers_idx[parsed['worker_id']]['name']}")
+        else:
+            st.info('Try: `add a swedish massage to Budi for customer "Ali"`')
 
 
 import streamlit as st
