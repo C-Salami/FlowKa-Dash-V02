@@ -9,3 +9,6 @@ requests>=2.31.0
 
 # Streamlit: pick ONE, new enough to have st.audio_input
 streamlit==1.42.0
+
+pydub==0.25.1
+ffmpeg-python==0.2.0
