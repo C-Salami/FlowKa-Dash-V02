@@ -3,12 +3,9 @@ dash-extensions==1.0.15
 pandas==2.2.2
 plotly==5.22.0
 gunicorn==22.0.0
-plotly==5.22.0
-pandas==2.2.2
-streamlit==1.36.0
-plotly==5.22.0
-pandas==2.2.2
 
-streamlit>=1.40.0
+# Voice/STT
 requests>=2.31.0
 
+# Streamlit: pick ONE, new enough to have st.audio_input
+streamlit==1.42.0
