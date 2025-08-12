@@ -98,3 +98,51 @@ if audio is not None:
         st.error(f"STT API error: {e.response.text[:200]}")
     except Exception as e:
         st.error(f"Error: {e}")
+
+
+import streamlit as st
+
+# ... keep your other imports and functions ...
+
+st.markdown("### Voice booking (mic)")
+
+AUDIO_INPUT_AVAILABLE = hasattr(st, "audio_input")
+
+if AUDIO_INPUT_AVAILABLE:
+    audio = st.audio_input("Press to record, then stop", key="voice_mic")
+    if audio is not None:
+        transcript = transcribe_via_api(audio.getvalue(), audio.type or "audio/webm")
+        st.write(f"**Heard:** {transcript}")
+        parsed = parse_voice_command(
+            transcript,
+            {s["name"].lower(): s for s in SERVICES},
+            {w["name"].lower(): w for w in WORKERS},
+        )
+        if parsed:
+            push_to_plan(parsed["customer"], parsed["service_id"], parsed["worker_id"])
+            st.success(
+                f"Added {services_idx[parsed['service_id']]['name']} for {parsed['customer']} "
+                f"→ {workers_idx[parsed['worker_id']]['name']}"
+            )
+        else:
+            st.info('Try: `add a swedish massage to Budi for customer "Ali"`')
+else:
+    st.warning("This Streamlit version doesn’t support mic capture. Update to Streamlit ≥ 1.40, or use the uploader below.")
+    audio_file = st.file_uploader("Upload a short voice note", type=["webm","wav","m4a","mp3"])
+    if audio_file is not None:
+        transcript = transcribe_via_api(audio_file.getvalue(), audio_file.type or "audio/webm")
+        st.write(f"**Heard:** {transcript}")
+        parsed = parse_voice_command(
+            transcript,
+            {s["name"].lower(): s for s in SERVICES},
+            {w["name"].lower(): w for w in WORKERS},
+        )
+        if parsed:
+            push_to_plan(parsed["customer"], parsed["service_id"], parsed["worker_id"])
+            st.success(
+                f"Added {services_idx[parsed['service_id']]['name']} for {parsed['customer']} "
+                f"→ {workers_idx[parsed['worker_id']]['name']}"
+            )
+        else:
+            st.info('Try: `add a swedish massage to Budi for customer "Ali"`')
+
