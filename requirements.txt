@@ -1,25 +1,8 @@
-dash==2.17.1
-dash-extensions==1.0.15
-pandas==2.2.2
-plotly==5.22.0
-gunicorn==22.0.0
-
-# Voice/STT
-requests>=2.31.0
-
-# Streamlit: pick ONE, new enough to have st.audio_input
-streamlit==1.42.0
-
-pydub==0.25.1
-ffmpeg-python==0.2.0
-rapidfuzz==3.9.6
-
 streamlit==1.42.0
 pandas==2.2.2
 plotly==5.22.0
 requests>=2.31.0
 pydub==0.25.1
 ffmpeg-python==0.2.0
-rapidfuzz==3.9.6   # or use the built-in fallback
+rapidfuzz==3.9.6            # or use the fallback inside the code
 streamlit-plotly-events==0.0.6
-
