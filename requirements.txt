@@ -13,3 +13,13 @@ streamlit==1.42.0
 pydub==0.25.1
 ffmpeg-python==0.2.0
 rapidfuzz==3.9.6
+
+streamlit==1.42.0
+pandas==2.2.2
+plotly==5.22.0
+requests>=2.31.0
+pydub==0.25.1
+ffmpeg-python==0.2.0
+rapidfuzz==3.9.6   # or use the built-in fallback
+streamlit-plotly-events==0.0.6
+
