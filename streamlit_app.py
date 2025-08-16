@@ -1,5 +1,9 @@
 # streamlit_app.py
-# Spa Scheduler — 3-day seeded plan + Form + Mic (confirm) + Click-to-edit
+# Spa Scheduler — 2D Gantt (time × workers), seeded 3/4 days + Form + Mic + Click-to-edit
+# - One row per worker, tasks laid out over multiple days on the same row
+# - Mic block on top-left
+# - Reset moved under 3-dots popover
+# - Click a bar to edit/delete
 
 import io
 import re
@@ -9,8 +13,8 @@ import requests
 import pandas as pd
 import plotly.express as px
 import streamlit as st
-from pydub import AudioSegment  # pydub==0.25.1, ffmpeg-python==0.2.0
-from streamlit_plotly_events import plotly_events  # streamlit-plotly-events==0.0.6
+from pydub import AudioSegment                      # pydub==0.25.1, ffmpeg-python==0.2.0
+from streamlit_plotly_events import plotly_events   # streamlit-plotly-events==0.0.6
 
 # ---------- optional fuzzy: try rapidfuzz, else difflib fallback ----------
 try:
@@ -25,7 +29,7 @@ except Exception:
         return (match[0], 100) if match else (None, 0)
 
 # -------------------- App config --------------------
-st.set_page_config(page_title="Spa Scheduler (3-Day • Form + Mic • Edit)", layout="wide")
+st.set_page_config(page_title="Spa Scheduler (2D • Mic • Edit)", layout="wide")
 
 # -------------------- Demo data ---------------------
 WORKERS = [
@@ -49,8 +53,6 @@ workers_idx  = {w["id"]: w for w in WORKERS}
 # -------------------- App state ---------------------
 if "seq" not in st.session_state:
     st.session_state.seq = 0
-
-# plan_by_day: dict[YYYY-MM-DD] -> [{"worker_id": .., "tasks": [{"id","customer","service_id"}]}]
 if "plan_by_day" not in st.session_state:
     def seed_day(d: date):
         customers = ["Ali", "Maya", "Rafi", "Lina", "John", "Emma", "Tom", "Sara"]
@@ -58,7 +60,7 @@ if "plan_by_day" not in st.session_state:
         seeded = []
         for w in WORKERS:
             tasks = []
-            slots = random.choice([1, 2])  # keep gaps
+            slots = random.choice([1, 2])  # leave gaps
             for _ in range(slots):
                 st.session_state.seq += 1
                 tasks.append({
@@ -78,11 +80,9 @@ if "plan_by_day" not in st.session_state:
 # temp voice state
 for k in ("mic_audio_bytes", "mic_audio_mime", "mic_transcript", "mic_cmd"):
     st.session_state.setdefault(k, None)
-
-# currently selected (clicked) task to edit
+# selected task for edit
 if "selected_task" not in st.session_state:
-    # {"day": "YYYY-MM-DD", "task_id": "tX", "worker_id": "wY"}
-    st.session_state.selected_task = None
+    st.session_state.selected_task = None  # {"day","task_id","worker_id"}
 
 # -------------------- Helpers -----------------------
 def ensure_day_exists(day_iso: str):
@@ -99,17 +99,23 @@ def push_to_plan(day_iso: str, customer: str, service_id: str, worker_id: str):
             break
 
 def build_schedule_df(start_day: date, days: int = 3) -> pd.DataFrame:
+    """One row per worker across the entire time axis; tasks placed on Start/Finish over actual dates."""
     rows = []
     for i in range(days):
         d = (start_day + timedelta(days=i))
         d_iso = d.isoformat()
         ensure_day_exists(d_iso)
         day_cols = st.session_state.plan_by_day[d_iso]
+
         start_hour = 9
-        cur_start_by_worker = {c["worker_id"]: datetime.combine(d, datetime.min.time()).replace(hour=start_hour) for c in day_cols}
+        cur_start_by_worker = {
+            c["worker_id"]: datetime.combine(d, datetime.min.time()).replace(hour=start_hour)
+            for c in day_cols
+        }
         for col in day_cols:
-            worker_name = workers_idx[col["worker_id"]]["name"]
-            cur = cur_start_by_worker[col["worker_id"]]
+            worker_id = col["worker_id"]
+            worker_name = workers_idx[worker_id]["name"]
+            cur = cur_start_by_worker[worker_id]
             for t in col["tasks"]:
                 svc = services_idx[t["service_id"]]
                 dur = timedelta(minutes=svc["duration_min"])
@@ -118,8 +124,8 @@ def build_schedule_df(start_day: date, days: int = 3) -> pd.DataFrame:
                     "TaskId": t["id"],
                     "Customer": t["customer"],
                     "Service": svc["name"],
-                    "Worker": worker_name,
-                    "WorkerId": col["worker_id"],
+                    "Worker": worker_name,     # y-axis uses single worker name across all days
+                    "WorkerId": worker_id,
                     "Start": pd.Timestamp(cur),
                     "Finish": pd.Timestamp(cur + dur),
                     "Duration(min)": svc["duration_min"],
@@ -129,7 +135,6 @@ def build_schedule_df(start_day: date, days: int = 3) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 def find_task(day_iso: str, task_id: str):
-    """Return (worker_col, task_index, task_dict) or (None, None, None)."""
     ensure_day_exists(day_iso)
     for col in st.session_state.plan_by_day[day_iso]:
         for idx, t in enumerate(col["tasks"]):
@@ -141,9 +146,7 @@ def reassign_task(day_iso: str, task_id: str, new_worker_id: str):
     src_col, idx, task = find_task(day_iso, task_id)
     if not task:
         return False
-    # remove from source
     src_col["tasks"].pop(idx)
-    # append to destination worker
     for col in st.session_state.plan_by_day[day_iso]:
         if col["worker_id"] == new_worker_id:
             col["tasks"].append(task)
@@ -232,7 +235,6 @@ def _best_worker_match(text: str):
 
 def interpret_command(utterance: str):
     t = utterance.strip()
-
     # customer (quoted; or after "customer"; or after "book"/"gives")
     m = re.search(r'customer\s+"([^"]+)"', t, flags=re.IGNORECASE) \
         or re.search(r"customer\s+'([^']+)'", t, flags=re.IGNORECASE)
@@ -267,57 +269,15 @@ def apply_command(day_iso: str, cmd: dict):
 
 # -------------------- Layout ------------------------
 left, right = st.columns([1, 4], gap="large")
-
 today = date.today()
 
 with left:
     st.title("Spa Scheduler")
-    st.caption("Pre-seeded 3 days with gaps. Add more via form or mic.")
-    sel_day = st.date_input("Planning date", value=today, min_value=today, format="YYYY-MM-DD")
+    st.caption("One row per therapist. Add more via mic or form. Reset lives in the ⋮ menu.")
 
-    # Manual form
-    st.subheader("Add booking (manual)")
-    m_customer = st.text_input("Customer")
-    m_service  = st.selectbox(
-        "Service",
-        options=[s["id"] for s in SERVICES],
-        format_func=lambda sid: f"{services_idx[sid]['name']} ({services_idx[sid]['duration_min']}m)",
-        key="manual_service",
-    )
-    m_worker = st.selectbox(
-        "Worker",
-        options=[w["id"] for w in WORKERS],
-        format_func=lambda wid: workers_idx[wid]["name"],
-        key="manual_worker",
-    )
-
-    c1, c2 = st.columns([2,1])
-    with c1:
-        if st.button("Push to plan", type="primary", use_container_width=True):
-            if m_customer and m_service and m_worker:
-                push_to_plan(sel_day.isoformat(), m_customer, m_service, m_worker)
-                st.success(f"Added {services_idx[m_service]['name']} for {m_customer} → {workers_idx[m_worker]['name']} on {sel_day.isoformat()}")
-            else:
-                st.warning("Please complete all fields.")
-    with c2:
-        if st.button("Reset 3 days", use_container_width=True):
-            st.session_state.seq = 0
-            st.session_state.plan_by_day = {}
-            for i in range(3):
-                d = today + timedelta(days=i)
-                st.session_state.plan_by_day[d.isoformat()] = [{"worker_id": w["id"], "tasks": []} for w in WORKERS]
-            st.session_state.mic_audio_bytes = None
-            st.session_state.mic_audio_mime  = None
-            st.session_state.mic_transcript  = None
-            st.session_state.mic_cmd         = None
-            st.session_state.selected_task   = None
-            st.experimental_rerun()
-
-    st.divider()
-
-    # Mic section (preview before applying)
-    st.subheader("🎙 Voice booking (preview first)")
-    st.caption("Speak e.g. “add a swedish massage to Budi for customer ‘Ali’”. We’ll add it to the selected day.")
+    # Mic FIRST (top)
+    st.subheader("🎙 Voice booking (preview)")
+    st.caption("Example: “add a swedish massage to Budi for customer ‘Ali’”.")
     AUDIO_INPUT_AVAILABLE = hasattr(st, "audio_input")
     if AUDIO_INPUT_AVAILABLE:
         audio_file = st.audio_input("Record, then stop", key="voice_mic_record")
@@ -325,6 +285,32 @@ with left:
         st.info("Mic capture requires Streamlit ≥ 1.40. Use the uploader instead.")
         audio_file = st.file_uploader("Upload a short voice note", type=["webm","wav","m4a","mp3"], key="voice_mic_upload")
 
+    # Choose date span
+    st.divider()
+    st.subheader("Planning window")
+    c_date, c_span, c_menu = st.columns([2, 1, 1])
+    with c_date:
+        sel_day = st.date_input("Start day", value=today, min_value=today, format="YYYY-MM-DD", key="start_day")
+    with c_span:
+        span_days = st.selectbox("Days", options=[3, 4], index=0, help="How many days to show on the timeline?")
+    with c_menu:
+        # neat 3-dots popover for admin tools (like reset)
+        with st.popover("⋮"):
+            st.write("Admin tools")
+            if st.button("Reset seeded 3 days"):
+                st.session_state.seq = 0
+                st.session_state.plan_by_day = {}
+                for i in range(3):
+                    d = today + timedelta(days=i)
+                    st.session_state.plan_by_day[d.isoformat()] = [{"worker_id": w["id"], "tasks": []} for w in WORKERS]
+                st.session_state.mic_audio_bytes = None
+                st.session_state.mic_audio_mime  = None
+                st.session_state.mic_transcript  = None
+                st.session_state.mic_cmd         = None
+                st.session_state.selected_task   = None
+                st.experimental_rerun()
+
+    # Voice flow: record -> transcribe -> preview -> push
     if audio_file is not None:
         st.session_state.mic_audio_bytes = audio_file.getvalue()
         st.session_state.mic_audio_mime  = audio_file.type or "audio/webm"
@@ -345,29 +331,44 @@ with left:
             svc_name = next(s["name"] for s in SERVICES if s["id"] == cmd["service_id"])
             w_name   = next(w["name"] for w in WORKERS  if w["id"] == cmd["worker_id"])
             st.success(f"Parsed → Service: {svc_name} | Worker: {w_name} | Customer: {cmd['customer']}")
-            pc1, pc2 = st.columns(2)
-            with pc1:
-                if st.button("Push to plan (voice)", type="primary", use_container_width=True):
-                    ok, msg = apply_command(sel_day.isoformat(), cmd)
-                    if ok:
-                        st.success(msg)
-                        st.session_state.mic_transcript = None
-                        st.session_state.mic_cmd = None
-            with pc2:
-                if st.button("Record again", use_container_width=True):
-                    st.session_state.mic_audio_bytes = None
-                    st.session_state.mic_audio_mime  = None
-                    st.session_state.mic_transcript  = None
-                    st.session_state.mic_cmd         = None
-                    st.experimental_rerun()
+            if st.button("Push to plan (voice)", type="primary", use_container_width=True):
+                ok, msg = apply_command(sel_day.isoformat(), cmd)
+                if ok:
+                    st.success(msg)
+                    st.session_state.mic_transcript = None
+                    st.session_state.mic_cmd = None
         else:
-            st.warning("I couldn’t understand a full booking. Try: `add a swedish massage to Budi for customer \"Ali\"`")
+            st.warning("Couldn’t parse a full booking. Try the example above.")
             if st.button("Record again", key="retry_btn", use_container_width=True):
                 st.session_state.mic_audio_bytes = None
                 st.session_state.mic_audio_mime  = None
                 st.session_state.mic_transcript  = None
                 st.session_state.mic_cmd         = None
                 st.experimental_rerun()
+
+    st.divider()
+
+    # Manual form
+    st.subheader("Add booking (manual)")
+    m_customer = st.text_input("Customer")
+    m_service  = st.selectbox(
+        "Service",
+        options=[s["id"] for s in SERVICES],
+        format_func=lambda sid: f"{services_idx[sid]['name']} ({services_idx[sid]['duration_min']}m)",
+        key="manual_service",
+    )
+    m_worker = st.selectbox(
+        "Worker",
+        options=[w["id"] for w in WORKERS],
+        format_func=lambda wid: workers_idx[wid]["name"],
+        key="manual_worker",
+    )
+    if st.button("Push to plan", type="primary", use_container_width=True):
+        if m_customer and m_service and m_worker:
+            push_to_plan(sel_day.isoformat(), m_customer, m_service, m_worker)
+            st.success(f"Added {services_idx[m_service]['name']} for {m_customer} → {workers_idx[m_worker]['name']} on {sel_day.isoformat()}")
+        else:
+            st.warning("Please complete all fields.")
 
     st.divider()
 
@@ -380,7 +381,6 @@ with left:
         cur_worker_id = sel["worker_id"]
         _, _, t = find_task(day_iso, task_id)
         if t:
-            # current values
             cur_service_id = t["service_id"]
             cur_customer   = t["customer"]
 
@@ -404,12 +404,9 @@ with left:
             ec1, ec2, ec3 = st.columns([2,2,1])
             with ec1:
                 if st.button("Save changes", type="primary", use_container_width=True):
-                    # update fields
-                    # if worker changed → reassign
                     if e_worker != cur_worker_id:
                         reassign_task(day_iso, task_id, e_worker)
                         cur_worker_id = e_worker
-                    # update current task's customer/service
                     col, idx, task_ref = find_task(day_iso, task_id)
                     if task_ref:
                         task_ref["customer"]   = e_customer
@@ -433,42 +430,48 @@ with left:
         st.info("Click a bar in the chart to edit.")
 
 with right:
-    st.subheader(f"Schedule • {sel_day.isoformat()} → {(sel_day + timedelta(days=2)).isoformat()}")
-    df = build_schedule_df(sel_day, days=3)
-    if df.empty:
-        st.info("No bookings yet. Use the form or voice on the left.")
-    else:
-        # Build figure with customdata so we can identify clicked tasks
-        fig = px.timeline(
-            df, x_start="Start", x_end="Finish",
-            y="Worker", color="Service", text="Customer",
-            hover_data=["Duration(min)"], facet_row="Day",
-            category_orders={"Day": sorted(df["Day"].unique())}
-        )
-        # attach customdata: [TaskId, Day, WorkerId]
-        fig.update_traces(customdata=df[["TaskId", "Day", "WorkerId"]].to_numpy().tolist())
-        fig.update_yaxes(autorange="reversed", matches=None)
-        fig.for_each_annotation(lambda a: a.update(text=a.text.replace("Day=", "")))
-        fig.update_traces(textposition="inside", insidetextanchor="start", textfont_size=12, cliponaxis=False)
-        fig.update_layout(margin=dict(l=20, r=20, t=40, b=20), height=900)
+    st.subheader(f"Schedule • {sel_day.isoformat()} → {(sel_day + timedelta(days=span_days-1)).isoformat()}")
 
-        # Use streamlit-plotly-events to capture clicks
+    df = build_schedule_df(sel_day, days=span_days)
+    if df.empty:
+        st.info("No bookings yet. Use the mic or the form on the left.")
+    else:
+        # Colors by Service; one row per worker; full time axis over multiple days
+        fig = px.timeline(
+            df,
+            x_start="Start",
+            x_end="Finish",
+            y="Worker",
+            color="Service",
+            text="Customer",
+            hover_data=["Day", "Duration(min)"],
+            category_orders={"Worker": [w["name"] for w in WORKERS]},
+        )
+        # Attach identifiers so clicks work
+        fig.update_traces(customdata=df[["TaskId", "Day", "WorkerId"]].to_numpy().tolist())
+
+        # Layout polish for 2D view
+        fig.update_yaxes(autorange="reversed")  # Gantt convention
+        fig.update_traces(textposition="inside", insidetextanchor="start", textfont_size=12, cliponaxis=False)
+        fig.update_layout(
+            margin=dict(l=20, r=20, t=40, b=20),
+            height=900,
+            xaxis_title=None,
+            yaxis_title=None,
+            legend_title_text="Service",
+        )
+
+        # Interactions: click a bar to edit
         events = plotly_events(
             fig, click_event=True, hover_event=False, select_event=False,
             override_height=900, key="gantt_click_events"
         )
-
         if events:
-            # events is a list of points; take the first
             pt = events[0]
-            # safety: customdata may be nested based on lib version
             cd = pt.get("customdata") or []
             if isinstance(cd, list) and len(cd) >= 3:
                 task_id, day_iso, worker_id = cd[0], cd[1], cd[2]
                 st.session_state.selected_task = {"task_id": task_id, "day": day_iso, "worker_id": worker_id}
                 st.rerun()
-        else:
-            # no clicks in this rerun
-            pass
 
-st.caption("Tip: pick a day on the left, then add by form or voice. Click a bar to edit or delete.")
+st.caption("Tip: Use mic or form to add on the selected start day. Chart shows 3–4 days on one timeline with one row per worker.")
